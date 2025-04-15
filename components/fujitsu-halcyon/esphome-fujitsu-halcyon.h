@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <memory>
 
 #include <esphome/core/component.h>
@@ -48,6 +49,18 @@ class FujitsuHalcyonController : public Component, public climate::Climate, publ
                 this->controller->set_function(this->function->state, this->function_value->state, this->function_unit->state);
         });
 
+        std::array<CustomSwitch*, fujitsu_halcyon_controller::MaximumZones> zone_switches = [this] {
+            std::array<CustomSwitch*, fujitsu_halcyon_controller::MaximumZones> switches;
+
+            for (auto i = 0; i < switches.size(); i++)
+                switches[i] = new CustomSwitch([this, i](bool state) { return this->controller->set_zone(i, state, this->ignore_lock_); });
+
+            return switches;
+        }();
+
+        CustomSwitch* zone_group_day_switch = new CustomSwitch([this](bool state) { return this->controller->set_zone_group_day(state, this->ignore_lock_); });
+        CustomSwitch* zone_group_night_switch = new CustomSwitch([this](bool state) { return this->controller->set_zone_group_night(state, this->ignore_lock_); });
+
         FujitsuHalcyonController(uart::IDFUARTComponent *parent, uint8_t controller_address) : uart::UARTDevice(parent), controller_address_(controller_address) {}
 
         void setup() override;
@@ -74,6 +87,7 @@ class FujitsuHalcyonController : public Component, public climate::Climate, publ
         fujitsu_general::airstage::h::Controller* controller;
 
         void update_from_device(const fujitsu_general::airstage::h::Config& data);
+        void update_from_device(const fujitsu_general::airstage::h::ZoneConfig& data);
         void update_from_device(const fujitsu_general::airstage::h::Packet& data);
         void update_from_device(const fujitsu_general::airstage::h::Function& data);
         void update_from_controller(const uint8_t address, const fujitsu_general::airstage::h::Config& data);

@@ -19,6 +19,7 @@ void FujitsuHalcyonController::setup() {
             .Config = [this](const fujitsu_general::airstage::h::Config& data){ this->update_from_device(data); },
             .Error  = [this](const fujitsu_general::airstage::h::Packet& data){ this->update_from_device(data); },
             .Function = [this](const fujitsu_general::airstage::h::Function& data){ this->update_from_device(data); },
+            .ZoneConfig = [this](const fujitsu_general::airstage::h::ZoneConfig& data){ this->update_from_device(data); },
             .ControllerConfig = [this](const uint8_t address, const fujitsu_general::airstage::h::Config& data){ this->update_from_controller(address, data); },
             .InitializationStage = [this](const fujitsu_general::airstage::h::InitializationStageEnum stage){
                 this->initialization_sensor->publish_state(str_sprintf("(%d/%d)", stage, fujitsu_general::airstage::h::InitializationStageEnum::Complete));
@@ -127,6 +128,12 @@ void FujitsuHalcyonController::dump_config() {
             ESP_LOGCONFIG(TAG, "    - Maintenance");
         if (features.SensorSwitching)
             ESP_LOGCONFIG(TAG, "    - Sensor Switching");
+        if (features.Zones) {
+            auto zones = this->controller->get_zones();
+
+            ESP_LOGCONFIG(TAG, "    - Zones: %s", zones.EnabledZones.count());
+            ESP_LOGCONFIG(TAG, "        Common Zone: %s", zones.ZoneCommon ? "YES" : "NO");
+        }
     }
 
     if (!this->filter_sensor->is_internal())
@@ -150,6 +157,7 @@ climate::ClimateTraits FujitsuHalcyonController::traits() {
     using namespace climate;
 
     auto features = this->controller->get_features();
+    auto zones = this->controller->get_zones();
     auto traits = ClimateTraits();
 
     // Target temperature / Setpoint
@@ -226,6 +234,12 @@ climate::ClimateTraits FujitsuHalcyonController::traits() {
         this->filter_sensor->set_internal(false);
         this->reset_filter_button->set_internal(false);
     }
+
+    // Zones
+    if (features.Zones)
+        for (auto i = 0; i < this->zone_switches.size(); i++)
+            if (zones.EnabledZones.test(i))
+                this->zone_switches[i]->set_internal(false);
 
     this->reinitialize_button->set_internal(false);
 
@@ -329,6 +343,14 @@ void FujitsuHalcyonController::update_from_device(const fujitsu_general::airstag
 
     if (need_to_publish)
         this->publish_state();
+}
+
+void FujitsuHalcyonController::update_from_device(const fujitsu_general::airstage::h::ZoneConfig& data) {
+    for (auto i = 0; i < this->zone_switches.size(); i++)
+        this->zone_switches[i]->publish_state(data.ActiveZones[i]);
+
+    this->zone_group_day_switch->publish_state(data.ActiveZoneGroups.Day);
+    this->zone_group_night_switch->publish_state(data.ActiveZoneGroups.Night);
 }
 
 void FujitsuHalcyonController::update_from_device(const fujitsu_general::airstage::h::Packet& data) {

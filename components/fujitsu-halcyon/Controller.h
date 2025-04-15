@@ -58,8 +58,10 @@ constexpr Features DefaultFeatures = {
 enum class InitializationStageEnum : uint8_t {
     DetectFeatureSupport,
     FeatureRequest,
+    ZoneRequestEnabled,
     FindNextControllerTx,
     FindNextControllerRx,
+    ZoneRequestActive,
     Complete
 };
 
@@ -81,10 +83,27 @@ namespace SettableFields {
     };
 };
 
+namespace ZoneSettableFields {
+    enum {
+        Zone1Active,
+        Zone2Active,
+        Zone3Active,
+        Zone4Active,
+        Zone5Active,
+        Zone6Active,
+        Zone7Active,
+        Zone8Active,
+        ZoneGroupDayActive,
+        ZoneGroupNightActive,
+        MAX
+    };
+};
+
 class Controller {
     using ConfigCallback = std::function<void(const Config&)>;
     using ErrorCallback  = std::function<void(const Packet&)>;
     using FunctionCallback = std::function<void(const Function&)>;
+    using ZoneConfigCallback = std::function<void(const ZoneConfig&)>;
     using ControllerConfigCallback = std::function<void(const uint8_t address, const Config&)>;
     using InitializationStageCallback = std::function<void(const InitializationStageEnum stage)>;
     using ReadBytesCallback  = std::function<void(uint8_t *data, size_t len)>;
@@ -94,6 +113,7 @@ class Controller {
         ConfigCallback Config;
         ErrorCallback Error;
         FunctionCallback Function;
+        ZoneConfigCallback ZoneConfig;
         ControllerConfigCallback ControllerConfig;
         InitializationStageCallback InitializationStage;
         ReadBytesCallback ReadBytes;
@@ -111,6 +131,7 @@ class Controller {
         void reinitialize() { this->set_initialization_stage(InitializationStageEnum::DetectFeatureSupport); }
         InitializationStageEnum get_initialization_stage() const { return this->initialization_stage; }
         const struct Features& get_features() const { return this->features; }
+        const decltype(ZoneFunction::IndoorUnit) get_zones() const { return this->zones; }
 
         void set_current_temperature(float temperature);
         bool set_enabled(bool enabled, bool ignore_lock = false);
@@ -130,6 +151,10 @@ class Controller {
         void get_function(uint8_t function, uint8_t unit) { this->function_queue.push({ .Function = function, .Unit = unit }); }
         void set_function(uint8_t function, uint8_t value, uint8_t unit) { this->function_queue.push({ true, function, value, unit }); }
 
+        bool set_zone(uint8_t zone, bool active, bool ignore_lock = false);
+        bool set_zone_group_day(bool active, bool ignore_lock = false);
+        bool set_zone_group_night(bool active, bool ignore_lock = false);
+
     protected:
         InitializationStageEnum initialization_stage;
         AddressTypeEnum next_token_destination_type = AddressTypeEnum::IndoorUnit;
@@ -147,8 +172,14 @@ class Controller {
         struct Features features = {};
         struct Config current_configuration = {};
         struct Config changed_configuration = {};
+        struct ZoneConfig current_zone_configuration = {};
+        struct ZoneConfig changed_zone_configuration = {};
+        decltype(ZoneFunction::IndoorUnit) zones = {};
+
         std::bitset<SettableFields::MAX> configuration_changes;
         std::queue<struct Function> function_queue;
+        std::bitset<ZoneSettableFields::MAX> zone_configuration_changes;
+
         bool last_error_flag = false; // TODO handle errors for multiple indoor units...multiple errors per IU?
 
         [[noreturn]] void uart_event_task();
