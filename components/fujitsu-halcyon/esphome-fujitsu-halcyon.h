@@ -49,8 +49,8 @@ class FujitsuHalcyonController : public Component, public climate::Climate, publ
                 this->controller->set_function(this->function->state, this->function_value->state, this->function_unit->state);
         });
 
-        std::array<custom::CustomSwitch*, fujitsu_halcyon_controller::MaximumZones> zone_switches = [this] {
-            std::array<custom::CustomSwitch*, fujitsu_halcyon_controller::MaximumZones> switches;
+        std::array<custom::CustomSwitch*, fujitsu_general::airstage::h::MaximumZones> zone_switches = [this] {
+            std::array<custom::CustomSwitch*, fujitsu_general::airstage::h::MaximumZones> switches;
 
             for (auto i = 0; i < switches.size(); i++)
                 switches[i] = new custom::CustomSwitch([this, i](bool state) { return this->controller->set_zone(i, state, this->ignore_lock_); });
