@@ -49,17 +49,17 @@ class FujitsuHalcyonController : public Component, public climate::Climate, publ
                 this->controller->set_function(this->function->state, this->function_value->state, this->function_unit->state);
         });
 
-        std::array<CustomSwitch*, fujitsu_halcyon_controller::MaximumZones> zone_switches = [this] {
-            std::array<CustomSwitch*, fujitsu_halcyon_controller::MaximumZones> switches;
+        std::array<custom::CustomSwitch*, fujitsu_halcyon_controller::MaximumZones> zone_switches = [this] {
+            std::array<custom::CustomSwitch*, fujitsu_halcyon_controller::MaximumZones> switches;
 
             for (auto i = 0; i < switches.size(); i++)
-                switches[i] = new CustomSwitch([this, i](bool state) { return this->controller->set_zone(i, state, this->ignore_lock_); });
+                switches[i] = new custom::CustomSwitch([this, i](bool state) { return this->controller->set_zone(i, state, this->ignore_lock_); });
 
             return switches;
         }();
 
-        CustomSwitch* zone_group_day_switch = new CustomSwitch([this](bool state) { return this->controller->set_zone_group_day(state, this->ignore_lock_); });
-        CustomSwitch* zone_group_night_switch = new CustomSwitch([this](bool state) { return this->controller->set_zone_group_night(state, this->ignore_lock_); });
+        custom::CustomSwitch* zone_group_day_switch = new custom::CustomSwitch([this](bool state) { return this->controller->set_zone_group_day(state, this->ignore_lock_); });
+        custom::CustomSwitch* zone_group_night_switch = new custom::CustomSwitch([this](bool state) { return this->controller->set_zone_group_night(state, this->ignore_lock_); });
 
         FujitsuHalcyonController(uart::IDFUARTComponent *parent, uint8_t controller_address) : uart::UARTDevice(parent), controller_address_(controller_address) {}
 
