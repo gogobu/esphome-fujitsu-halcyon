@@ -11,7 +11,7 @@ namespace fujitsu_general::airstage::h {
 
 constexpr uint8_t PrimaryAddress = 0;
 constexpr uint8_t MaxAddress = 15;
-constexpr uint8_t MaxZone = 8; // Excludes Common/Constant Zone
+constexpr uint8_t MaximumZones = 8; // Excludes Common/Constant Zone
 
 enum class AddressTypeEnum : uint8_t {
     IndoorUnit,
@@ -133,7 +133,7 @@ struct ZoneConfig {
         bool Write;
     } Controller;
 
-    std::bitset<MaxZone> ActiveZones;
+    std::bitset<MaximumZones> ActiveZones;
 
     struct {
         bool Day;
@@ -141,15 +141,15 @@ struct ZoneConfig {
     } ActiveZoneGroups;
 
     struct {
-        std::bitset<MaxZone> Day;
-        std::bitset<MaxZone> Night;
+        std::bitset<MaximumZones> Day;
+        std::bitset<MaximumZones> Night;
     } ZoneGroupAssociations;
 };
 
 struct ZoneFunction {
-    struct Zones {
+    struct {
         bool ZoneCommon;
-        std::bitset<MaxZone> EnabledZones;
+        std::bitset<MaximumZones> EnabledZones;
     } IndoorUnit;
 
     struct {
@@ -322,7 +322,7 @@ class Packet {
     private:
         // std::bit_compress/std::bit_expand have been proposed for c++ STL (P3104), but are not available now so use these instead
         template<std::unsigned_integral T>
-        [[nodiscard]] constexpr static T extract_bits(const T input, const bool odd) noexcept {
+        constexpr static T extract_bits(const T input, const bool odd) {
             T output = 0;
             for (size_t i = 0, j = 0; i < std::numeric_limits<T>::digits; i++)
                 if (i % 2 == odd)
@@ -331,7 +331,7 @@ class Packet {
         };
 
         template<std::unsigned_integral T>
-        [[nodiscard]] constexpr static T interleave_bits(const T input, const bool odd) noexcept {
+        constexpr static T interleave_bits(const T input, const bool odd) {
             T output = 0;
             for (size_t i = 0, j = 0; i < std::numeric_limits<T>::digits; i++)
                 if (i % 2 == odd)

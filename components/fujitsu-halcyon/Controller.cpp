@@ -12,44 +12,138 @@ namespace fujitsu_general::airstage::h {
 
 static const char* TAG = "fujitsu_general::airstage::h::Controller";
 
-void Controller::process_uart_data() {
-    auto buffer_len = this->uart_available_bytes();
-    if (buffer_len >= Packet::FrameSize) {
-        Packet::Buffer buffer;
+bool Controller::start() {
+    int err;
+    auto uart_config = UARTConfig;
+    constexpr int intr_alloc_flags = 0;
+    constexpr uint32_t queue_size = 20; // ?
+    constexpr uint32_t stack_depth = 4096; // ?
+    constexpr UBaseType_t task_priority = 12; // ?
 
-        // Discard partial frame
-        if (auto discard = buffer_len % buffer.size()) {
-            this->uart_read_bytes(buffer.data(), discard);
-            ESP_LOGW(TAG, "Discarded %d bytes", discard);
-        }
+    // User should have called uart_set_pin before this point if necessary
 
-        // For each frame
-        while (buffer_len) {
-            this->uart_read_bytes(buffer.data(), buffer.size());
-            buffer_len = this->uart_available_bytes();
-            this->process_packet(buffer, buffer_len == 0 /* Indicates final packet on wire */);
+    if (this->uart_event_queue == nullptr && uart_is_driver_installed(this->uart_num)) {
+        err = uart_driver_delete(this->uart_num);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to delete UART driver: %s", esp_err_to_name(err));
+            return false;
         }
     }
+
+    if (!uart_is_driver_installed(this->uart_num)) {
+        const auto buffer_size = UART_HW_FIFO_LEN(this->uart_num) * 2;
+        err = uart_driver_install(this->uart_num, buffer_size, buffer_size, queue_size, &this->uart_event_queue, intr_alloc_flags);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to install UART driver: %s", esp_err_to_name(err));
+            return false;
+        }
+    }
+
+    err = uart_param_config(this->uart_num, &uart_config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to configure UART: %s", esp_err_to_name(err));
+        return false;
+    }
+
+    err = uart_set_mode(this->uart_num, UART_MODE_RS485_HALF_DUPLEX);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set UART mode: %s", esp_err_to_name(err));
+        return false;
+    }
+
+    // Protocol inter packet spacing is 44ms, the time to transmit 2 symbols at 500bps
+    // If we wait for default timeout (time to transmit 10 characters at 500bps),
+    // the transmit window is over before processing even begins.
+    err = uart_set_rx_timeout(this->uart_num, UARTInterPacketSymbolSpacing);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set UART RX timeout: %s", esp_err_to_name(err));
+        return false;
+    }
+
+    xTaskCreate([](void* o){ static_cast<Controller*>(o)->uart_event_task(); }, "UART_Event", stack_depth, this, task_priority, NULL);
+
+    return true;
 }
 
-size_t Controller::uart_available_bytes() {
-    return this->callbacks.AvailableBytes ? callbacks.AvailableBytes() : 0;
+void Controller::uart_event_task() {
+    uart_event_t event;
+
+    for(;;) {
+        if (xQueueReceive(this->uart_event_queue, &event, portMAX_DELAY)) {
+            switch(event.type) {
+                [[likely]] case UART_DATA:
+                    Packet::Buffer buffer;
+                    size_t buffer_len;
+
+                    // Discard partial frame
+                    uart_get_buffered_data_len(this->uart_num, &buffer_len);
+                    if (auto discard = buffer_len % buffer.size()) {
+                        this->uart_read_bytes(buffer.data(), discard);
+                        ESP_LOGW(TAG, "Discarded %d bytes", discard);
+                    }
+
+                    // For each frame
+                    for (auto i = 0; i < event.size / buffer.size(); i++) {
+                        this->uart_read_bytes(buffer.data(), buffer.size());
+                        uart_get_buffered_data_len(this->uart_num, &buffer_len);
+                        this->process_packet(buffer, buffer_len == 0 /* Indicates final packet on wire */);
+                    }
+
+                    break;
+
+                case UART_BREAK:
+                    // TODO Why rx break after tx?
+                    ESP_LOGD(TAG, "UART break!");
+                    break;
+
+                case UART_BUFFER_FULL:
+                    // Something went wrong - don't try to catch up,
+                    // just discard all pending data and start over
+                    ESP_LOGW(TAG, "UART ring buffer full!");
+                    uart_flush_input(this->uart_num);
+                    xQueueReset(this->uart_event_queue);
+                    break;
+
+                case UART_FIFO_OVF:
+                    // Something went wrong - don't try to catch up,
+                    // just discard all pending data and start over
+                    ESP_LOGW(TAG, "UART FIFO Overflow!");
+                    uart_flush_input(this->uart_num);
+                    xQueueReset(this->uart_event_queue);
+                    break;
+
+                case UART_PARITY_ERR:
+                    ESP_LOGW(TAG, "UART parity error");
+                    break;
+
+                case UART_FRAME_ERR:
+                    ESP_LOGW(TAG, "UART frame error");
+                    break;
+
+                default:
+                    ESP_LOGW(TAG, "Unhandled UART event type: %d", event.type);
+                    break;
+            }
+        }   
+    }
 }
 
 void Controller::uart_read_bytes(uint8_t *buf, size_t length) {
     if (this->callbacks.ReadBytes)
         callbacks.ReadBytes(buf, length);
+    else
+        ::uart_read_bytes(this->uart_num, buf, length, portMAX_DELAY);
 }
 
 void Controller::uart_write_bytes(const uint8_t *buf, size_t length) {
     if (this->callbacks.WriteBytes)
         callbacks.WriteBytes(buf, length);
+    else
+        ::uart_write_bytes(this->uart_num, buf, length);
 }
 
 void Controller::set_initialization_stage(const InitializationStageEnum stage) {
     this->initialization_stage = stage;
-
-    // This callback is not deferred; may need to redesign if it causes a delay beyond the transmit window
     if (this->callbacks.InitializationStage)
         callbacks.InitializationStage(stage);
 }
@@ -61,7 +155,7 @@ void Controller::process_packet(const Packet::Buffer& buffer, bool lastPacketOnW
     // Parse buffer
     Packet packet(buffer);
 
-    // Save token destination
+    // Finish initialization
     if (this->initialization_stage == InitializationStageEnum::FindNextControllerRx) {
         // Controller with address > configured did not transmit
         if (packet.SourceType != AddressTypeEnum::Controller)
@@ -111,7 +205,6 @@ void Controller::process_packet(const Packet::Buffer& buffer, bool lastPacketOnW
                 if (this->callbacks.Function)
                     deferred_callback = [&](){ this->callbacks.Function(packet.Function); };
                 break;
-
             case PacketTypeEnum::Status:
                 break;
 
@@ -119,7 +212,7 @@ void Controller::process_packet(const Packet::Buffer& buffer, bool lastPacketOnW
                 this->current_zone_configuration = packet.ZoneConfig;
 
                 if (this->initialization_stage == InitializationStageEnum::ZoneRequestActive)
-                    this->set_initialization_stage(InitializationStageEnum::Complete);
+                    this->initialization_stage = InitializationStageEnum::Complete;
 
                 if (this->callbacks.ZoneConfig)
                     deferred_callback = [&](){ this->callbacks.ZoneConfig(this->current_zone_configuration); };
@@ -129,7 +222,7 @@ void Controller::process_packet(const Packet::Buffer& buffer, bool lastPacketOnW
                 this->zones = packet.ZoneFunction.IndoorUnit;
 
                 if (this->initialization_stage == InitializationStageEnum::ZoneRequestEnabled)
-                    this->set_initialization_stage(InitializationStageEnum::FindNextControllerTx);
+                    this->initialization_stage = InitializationStageEnum::FindNextControllerTx;
                 break;
         }
     } else {
@@ -167,26 +260,27 @@ void Controller::process_packet(const Packet::Buffer& buffer, bool lastPacketOnW
         else if ((error_flag_changed && this->is_primary_controller()) ||
                  (packet.Type == PacketTypeEnum::Error && !this->is_primary_controller()))
             tx_packet.Type = PacketTypeEnum::Error;
-        else if (this->zone_configuration_changes.any()) {
-            tx_packet.Type = PacketTypeEnum::ZoneConfig;
-            tx_packet.ZoneConfig = this->current_zone_configuration;
-            tx_packet.ZoneConfig.Controller.Write = true;
-
-            for (size_t i = ZoneSettableFields::Zone1Active; i <= ZoneSettableFields::Zone8Active; i++)
-                if (this->zone_configuration_changes[i])
-                    tx_packet.ZoneConfig.ActiveZones[i] = this->changed_zone_configuration.ActiveZones[i];
-
-            if (this->zone_configuration_changes[ZoneSettableFields::ZoneGroupDayActive])
-                tx_packet.ZoneConfig.ActiveZoneGroups.Day = this->changed_zone_configuration.ActiveZoneGroups.Day;
-
-            if (this->zone_configuration_changes[ZoneSettableFields::ZoneGroupNightActive])
-                tx_packet.ZoneConfig.ActiveZoneGroups.Night = this->changed_zone_configuration.ActiveZoneGroups.Night;
-
-            this->zone_configuration_changes.reset();
-        } else if (!this->function_queue.empty()) {
+        else if (!this->function_queue.empty()) {
             tx_packet.Type = PacketTypeEnum::Function;
             tx_packet.Function = this->function_queue.front();
             this->function_queue.pop();
+        }
+        else if (this->zone_configuration_changes.any()) {
+                tx_packet.Type = PacketTypeEnum::ZoneConfig;
+                tx_packet.ZoneConfig = this->current_zone_configuration;
+                tx_packet.ZoneConfig.Controller.Write = true;
+
+                for (size_t i = ZoneSettableFields::Zone1Active; i <= ZoneSettableFields::Zone8Active; i++)
+                    if (this->zone_configuration_changes[i])
+                        tx_packet.ZoneConfig.ActiveZones[i] = this->changed_zone_configuration.ActiveZones[i];
+
+                if (this->zone_configuration_changes[ZoneSettableFields::ZoneGroupDayActive])
+                    tx_packet.ZoneConfig.ActiveZoneGroups.Day = this->changed_zone_configuration.ActiveZoneGroups.Day;
+
+                if (this->zone_configuration_changes[ZoneSettableFields::ZoneGroupNightActive])
+                    tx_packet.ZoneConfig.ActiveZoneGroups.Night = this->changed_zone_configuration.ActiveZoneGroups.Night;
+
+                this->zone_configuration_changes.reset();
         } else {
             // First CONFIG packet sent from Fujitsu controller has write flag set, but we do not restore state at this time
             tx_packet.Type = PacketTypeEnum::Config;
