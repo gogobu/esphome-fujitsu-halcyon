@@ -242,7 +242,7 @@ void FujitsuHalcyonController::dump_config() {
         if (features.Zones) {
             auto zones = this->controller->get_zones();
 
-            ESP_LOGCONFIG(TAG, "    - Zones: %s", zones.EnabledZones.count());
+            ESP_LOGCONFIG(TAG, "    - Zones: %zu", zones.EnabledZones.count());
             ESP_LOGCONFIG(TAG, "        Common Zone: %s", zones.ZoneCommon ? "YES" : "NO");
         }
     }
