@@ -29,8 +29,8 @@ void FujitsuHalcyonController::setup() {
         {
             .Config = [this](const fujitsu_general::airstage::h::Config& data){ this->update_from_device(data); },
             .Error  = [this](const fujitsu_general::airstage::h::Packet& data){ this->update_from_device(data); },
-            .Function = [this](const fujitsu_general::airstage::h::Function& data){ this->update_from_device(data); },
             .ZoneConfig = [this](const fujitsu_general::airstage::h::ZoneConfig& data){ this->update_from_device(data); },
+            .Function = [this](const fujitsu_general::airstage::h::Function& data){ this->update_from_device(data); },
             .ControllerConfig = [this](const uint8_t address, const fujitsu_general::airstage::h::Config& data){ this->update_from_controller(address, data); },
             .InitializationStage = [this](const fujitsu_general::airstage::h::InitializationStageEnum stage){
                 this->on_initialization_stage(stage);
@@ -48,14 +48,6 @@ void FujitsuHalcyonController::setup() {
             }
         }
     );
-
-    // Apply user-supplied feature overrides from YAML. features_override_ was
-    // initialized to DefaultFeatures and individually mutated by any setters
-    // called from to_code(); fields the user did not specify still hold their
-    // DefaultFeatures value. Must be applied before the first packet is processed;
-    // setup() runs before loop() so this is safe.
-    this->controller->set_features(this->features_override_);
-    this->controller->set_autoconf(this->autoconf_);
 
     this->connected_sensor->publish_state(false);
 
@@ -140,35 +132,6 @@ void FujitsuHalcyonController::on_initialization_stage(const fujitsu_general::ai
     // and force a state publish so HA discovers them even if ListEntities already ran
     auto features = this->controller->get_features();
 
-    // Publish supported features as a human-readable diagnostic string.
-    // Built with basic string concatenation — std::format is not available in ESPHome.
-    {
-        std::string s;
-
-        s += "Mode:";
-        if (features.Mode.Auto)   s += " Auto";
-        if (features.Mode.Heat)   s += " Heat";
-        if (features.Mode.Cool)   s += " Cool";
-        if (features.Mode.Dry)    s += " Dry";
-        if (features.Mode.Fan)    s += " Fan";
-
-        s += " | Fan:";
-        if (features.FanSpeed.Auto)   s += " Auto";
-        if (features.FanSpeed.High)   s += " High";
-        if (features.FanSpeed.Medium) s += " Medium";
-        if (features.FanSpeed.Low)    s += " Low";
-        if (features.FanSpeed.Quiet)  s += " Quiet";
-
-        if (features.EconomyMode)       s += " | Economy";
-        if (features.FilterTimer)       s += " | Filter Timer";
-        if (features.SensorSwitching)   s += " | Sensor Switching";
-        if (features.Maintenance)       s += " | Maintenance";
-        if (features.VerticalLouvers)   s += " | V.Louvers";
-        if (features.HorizontalLouvers) s += " | H.Louvers";
-
-        this->supported_features_sensor->publish_state(s);
-    }
-
     if (features.SensorSwitching && this->temperature_sensor_ != nullptr) {
         this->use_sensor_switch->set_internal(false);
         this->use_sensor_switch->publish_state(this->use_sensor_switch->state);
@@ -189,15 +152,21 @@ void FujitsuHalcyonController::on_initialization_stage(const fujitsu_general::ai
         this->reset_filter_button->set_internal(false);
     }
 
-    if (features.Zones) {
-        auto zones = this->controller->get_zones();
+    // Zones
+    auto zones = this->controller->get_zones();
 
-        for (auto i = 0; i < this->zone_switches.size(); i++)
-            if (zones.EnabledZones.test(i))
+    if (features.Zones) {
+        for (auto i = 0; i < this->zone_switches.size(); i++) {
+            if (zones.EnabledZones.test(i)) {
                 this->zone_switches[i]->set_internal(false);
+                this->zone_switches[i]->publish_state(this->zone_switches[i]->state);
+            }
+        }
 
         this->zone_group_day_switch->set_internal(false);
+        this->zone_group_day_switch->publish_state(this->zone_group_day_switch->state);
         this->zone_group_night_switch->set_internal(false);
+        this->zone_group_night_switch->publish_state(this->zone_group_night_switch->state);
     }
 }
 
@@ -532,7 +501,7 @@ constexpr fujitsu_general::airstage::h::ModeEnum FujitsuHalcyonController::clima
         // Should not get to this point if traits is respected
         default: return FujitsuMode::Fan;
     }
-}
+} 
 
 constexpr fujitsu_general::airstage::h::FanSpeedEnum FujitsuHalcyonController::climate_fan_mode_to_fan_speed(climate::ClimateFanMode fan_speed) {
     using climate::ClimateFanMode;

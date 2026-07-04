@@ -48,6 +48,8 @@ void Controller::uart_write_bytes(const uint8_t *buf, size_t length) {
 
 void Controller::set_initialization_stage(const InitializationStageEnum stage) {
     this->initialization_stage = stage;
+
+    // This callback is not deferred; may need to redesign if it causes a delay beyond the transmit window
     if (this->callbacks.InitializationStage)
         callbacks.InitializationStage(stage);
 }
@@ -59,7 +61,7 @@ void Controller::process_packet(const Packet::Buffer& buffer, bool lastPacketOnW
     // Parse buffer
     Packet packet(buffer);
 
-    // Finish initialization
+    // Save token destination
     if (this->initialization_stage == InitializationStageEnum::FindNextControllerRx) {
         // Controller with address > configured did not transmit
         if (packet.SourceType != AddressTypeEnum::Controller)
@@ -74,26 +76,11 @@ void Controller::process_packet(const Packet::Buffer& buffer, bool lastPacketOnW
         switch (packet.Type) {
             [[likely]] case PacketTypeEnum::Config:
                 if (this->initialization_stage == InitializationStageEnum::DetectFeatureSupport) {
-                    // Advance to FindNextControllerTx (skip feature negotiation entirely) if:
-                    //  - autoconf is disabled (use the configured features directly), or
-                    //  - the IU's UnknownFlags == 2 (no feature negotiation support).
-                    // Otherwise, transition to FeatureRequestTx to send a FeatureRequest packet
-                    // when our turn with the token comes around. The actual transmission and
-                    // the subsequent transition to FeatureRequestRx happen later in this function.
-                    // Note: this->features is already initialized to DefaultFeatures (or to a
-                    // user-supplied override via set_features()), so no assignment is needed here.
-                    if (!this->autoconf ||
-                        packet.Config.IndoorUnit.UnknownFlags == 2) {
+                    if (packet.Config.IndoorUnit.UnknownFlags == 2) { // Guessing this means no feature support among other things
+                        this->features = DefaultFeatures;
                         this->set_initialization_stage(InitializationStageEnum::FindNextControllerTx);
                     } else
-                        this->set_initialization_stage(InitializationStageEnum::FeatureRequestTx);
-                }
-                else if (this->initialization_stage == InitializationStageEnum::FeatureRequestRx) {
-                    // We already transmitted a FeatureRequest and the IU replied with another
-                    // Config instead of a Features packet -> the IU does not support feature
-                    // negotiation. Fall back to the in-code (or user-supplied) defaults already
-                    // present in this->features and proceed.
-                    this->set_initialization_stage(InitializationStageEnum::FindNextControllerTx);
+                        this->set_initialization_stage(InitializationStageEnum::FeatureRequest);
                 }
 
                 if (this->last_error_flag != packet.Config.IndoorUnit.Error)
@@ -124,6 +111,7 @@ void Controller::process_packet(const Packet::Buffer& buffer, bool lastPacketOnW
                 if (this->callbacks.Function)
                     deferred_callback = [&](){ this->callbacks.Function(packet.Function); };
                 break;
+
             case PacketTypeEnum::Status:
                 break;
 
@@ -131,7 +119,7 @@ void Controller::process_packet(const Packet::Buffer& buffer, bool lastPacketOnW
                 this->current_zone_configuration = packet.ZoneConfig;
 
                 if (this->initialization_stage == InitializationStageEnum::ZoneRequestActive)
-                    this->initialization_stage = InitializationStageEnum::Complete;
+                    this->set_initialization_stage(InitializationStageEnum::Complete);
 
                 if (this->callbacks.ZoneConfig)
                     deferred_callback = [&](){ this->callbacks.ZoneConfig(this->current_zone_configuration); };
@@ -141,7 +129,7 @@ void Controller::process_packet(const Packet::Buffer& buffer, bool lastPacketOnW
                 this->zones = packet.ZoneFunction.IndoorUnit;
 
                 if (this->initialization_stage == InitializationStageEnum::ZoneRequestEnabled)
-                    this->initialization_stage = InitializationStageEnum::FindNextControllerTx;
+                    this->set_initialization_stage(InitializationStageEnum::FindNextControllerTx);
                 break;
         }
     } else {
@@ -170,12 +158,8 @@ void Controller::process_packet(const Packet::Buffer& buffer, bool lastPacketOnW
         tx_packet.TokenDestinationType = this->next_token_destination_type;
         tx_packet.TokenDestinationAddress = this->next_token_destination_type == AddressTypeEnum::Controller ? this->controller_address + 1 : 1;
 
-        if (this->initialization_stage == InitializationStageEnum::FeatureRequestTx) {
+        if (this->initialization_stage == InitializationStageEnum::FeatureRequest)
             tx_packet.Type = PacketTypeEnum::Features;
-            // Advance only after the request is actually transmitted, mirroring
-            // the FindNextControllerTx -> FindNextControllerRx transition above.
-            this->set_initialization_stage(InitializationStageEnum::FeatureRequestRx);
-        }
         else if (this->initialization_stage == InitializationStageEnum::ZoneRequestEnabled)
             tx_packet.Type = PacketTypeEnum::ZoneFunction;
         else if (this->initialization_stage == InitializationStageEnum::ZoneRequestActive)
@@ -183,27 +167,26 @@ void Controller::process_packet(const Packet::Buffer& buffer, bool lastPacketOnW
         else if ((error_flag_changed && this->is_primary_controller()) ||
                  (packet.Type == PacketTypeEnum::Error && !this->is_primary_controller()))
             tx_packet.Type = PacketTypeEnum::Error;
-        else if (!this->function_queue.empty()) {
+        else if (this->zone_configuration_changes.any()) {
+            tx_packet.Type = PacketTypeEnum::ZoneConfig;
+            tx_packet.ZoneConfig = this->current_zone_configuration;
+            tx_packet.ZoneConfig.Controller.Write = true;
+
+            for (size_t i = ZoneSettableFields::Zone1Active; i <= ZoneSettableFields::Zone8Active; i++)
+                if (this->zone_configuration_changes[i])
+                    tx_packet.ZoneConfig.ActiveZones[i] = this->changed_zone_configuration.ActiveZones[i];
+
+            if (this->zone_configuration_changes[ZoneSettableFields::ZoneGroupDayActive])
+                tx_packet.ZoneConfig.ActiveZoneGroups.Day = this->changed_zone_configuration.ActiveZoneGroups.Day;
+
+            if (this->zone_configuration_changes[ZoneSettableFields::ZoneGroupNightActive])
+                tx_packet.ZoneConfig.ActiveZoneGroups.Night = this->changed_zone_configuration.ActiveZoneGroups.Night;
+
+            this->zone_configuration_changes.reset();
+        } else if (!this->function_queue.empty()) {
             tx_packet.Type = PacketTypeEnum::Function;
             tx_packet.Function = this->function_queue.front();
             this->function_queue.pop();
-        }
-        else if (this->zone_configuration_changes.any()) {
-                tx_packet.Type = PacketTypeEnum::ZoneConfig;
-                tx_packet.ZoneConfig = this->current_zone_configuration;
-                tx_packet.ZoneConfig.Controller.Write = true;
-
-                for (size_t i = ZoneSettableFields::Zone1Active; i <= ZoneSettableFields::Zone8Active; i++)
-                    if (this->zone_configuration_changes[i])
-                        tx_packet.ZoneConfig.ActiveZones[i] = this->changed_zone_configuration.ActiveZones[i];
-
-                if (this->zone_configuration_changes[ZoneSettableFields::ZoneGroupDayActive])
-                    tx_packet.ZoneConfig.ActiveZoneGroups.Day = this->changed_zone_configuration.ActiveZoneGroups.Day;
-
-                if (this->zone_configuration_changes[ZoneSettableFields::ZoneGroupNightActive])
-                    tx_packet.ZoneConfig.ActiveZoneGroups.Night = this->changed_zone_configuration.ActiveZoneGroups.Night;
-
-                this->zone_configuration_changes.reset();
         } else {
             // First CONFIG packet sent from Fujitsu controller has write flag set, but we do not restore state at this time
             tx_packet.Type = PacketTypeEnum::Config;

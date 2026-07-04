@@ -51,12 +51,12 @@ constexpr Features DefaultFeatures = {
     .EconomyMode = true,
     .HorizontalLouvers = false,
     .VerticalLouvers = false,
+    .Zones = false,
 };
 
 enum class InitializationStageEnum : uint8_t {
     DetectFeatureSupport,
-    FeatureRequestTx,
-    FeatureRequestRx,
+    FeatureRequest,
     ZoneRequestEnabled,
     FindNextControllerTx,
     FindNextControllerRx,
@@ -112,8 +112,8 @@ class Controller {
     struct Callbacks {
         ConfigCallback Config;
         ErrorCallback Error;
-        FunctionCallback Function;
         ZoneConfigCallback ZoneConfig;
+        FunctionCallback Function;
         ControllerConfigCallback ControllerConfig;
         InitializationStageCallback InitializationStage;
         AvailableBytesCallback AvailableBytes;
@@ -132,20 +132,7 @@ class Controller {
         void reinitialize() { this->set_initialization_stage(InitializationStageEnum::DetectFeatureSupport); }
         InitializationStageEnum get_initialization_stage() const { return this->initialization_stage; }
         const struct Features& get_features() const { return this->features; }
-        const decltype(ZoneFunction::IndoorUnit) get_zones() const { return this->zones; }
-
-        // Override the in-code DefaultFeatures with a user-supplied Features struct.
-        // Used both as the initial fallback while probing and as the value applied
-        // when feature negotiation is skipped or unsupported.
-        // Must be called before the controller starts processing packets to take effect
-        // for the first IU Config received.
-        void set_features(const Features& features) { this->features = features; }
-
-        // Controls whether the controller probes the IU with a FeatureRequest packet.
-        // When false, the controller skips the FeatureRequest stage on the first IU
-        // Config and applies the configured features directly. Useful for IUs known
-        // to misbehave on FeatureRequest (e.g. enter a non-recoverable error state).
-        void set_autoconf(bool autoconf) { this->autoconf = autoconf; }
+        const ZoneFunction::Zones get_zones() const { return this->zones; }
 
         void set_current_temperature(float temperature);
         bool set_enabled(bool enabled, bool ignore_lock = false);
@@ -162,12 +149,12 @@ class Controller {
         bool reset_filter(bool ignore_lock = false);
         bool maintenance(bool ignore_lock = false);
 
-        void get_function(uint8_t function, uint8_t unit) { this->function_queue.push({ .Function = function, .Unit = unit }); }
-        void set_function(uint8_t function, uint8_t value, uint8_t unit) { this->function_queue.push({ true, function, value, unit }); }
-
         bool set_zone(uint8_t zone, bool active, bool ignore_lock = false);
         bool set_zone_group_day(bool active, bool ignore_lock = false);
         bool set_zone_group_night(bool active, bool ignore_lock = false);
+
+        void get_function(uint8_t function, uint8_t unit) { this->function_queue.push({ .Function = function, .Unit = unit }); }
+        void set_function(uint8_t function, uint8_t value, uint8_t unit) { this->function_queue.push({ true, function, value, unit }); }
 
     protected:
         InitializationStageEnum initialization_stage;
@@ -181,18 +168,17 @@ class Controller {
         uint8_t controller_address;
         Callbacks callbacks;
 
-        bool autoconf = true;
-        struct Features features = DefaultFeatures;
+        struct Features features = {};
         struct Config current_configuration = {};
         struct Config changed_configuration = {};
         struct ZoneConfig current_zone_configuration = {};
         struct ZoneConfig changed_zone_configuration = {};
-        decltype(ZoneFunction::IndoorUnit) zones = {};
+        ZoneFunction::Zones zones = {};
 
         std::bitset<SettableFields::MAX> configuration_changes;
-        std::queue<struct Function> function_queue;
         std::bitset<ZoneSettableFields::MAX> zone_configuration_changes;
 
+        std::queue<struct Function> function_queue;
         bool last_error_flag = false; // TODO handle errors for multiple indoor units...multiple errors per IU?
 
         size_t uart_available_bytes();
